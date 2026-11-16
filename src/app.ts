@@ -8,6 +8,15 @@ import { academicsRouter } from "./routes/academics.js";
 import { batchesRouter } from "./routes/batches.js";
 import { teachersRouter } from "./routes/teachers.js";
 import { studentsRouter } from "./routes/students.js";
+import { familyRouter } from "./routes/family.js";
+import { attendanceRouter } from "./routes/attendance.js";
+import { timetableRouter } from "./routes/timetable.js";
+import { dashboardRouter } from "./routes/dashboard.js";
+import { usersRouter } from "./routes/users.js";
+import { settingsRouter } from "./routes/settings.js";
+import { feesRouter } from "./routes/fees.js";
+import { examsRouter } from "./routes/exams.js";
+import { learningRouter } from "./routes/learning.js";
 
 export function createApp() {
   const app = express();
@@ -30,6 +39,15 @@ export function createApp() {
   app.use("/batches", batchesRouter);
   app.use("/teachers", teachersRouter);
   app.use("/students", studentsRouter);
+  app.use("/family", familyRouter);
+  app.use("/attendance", attendanceRouter);
+  app.use("/timetable", timetableRouter);
+  app.use("/dashboard", dashboardRouter);
+  app.use("/users", usersRouter);
+  app.use("/settings", settingsRouter);
+  app.use("/fees", feesRouter);
+  app.use("/exams", examsRouter);
+  app.use("/learning", learningRouter);
 
   app.use((_req, _res, next) => next(notFound("Unknown API route.")));
   app.use(errorHandler);

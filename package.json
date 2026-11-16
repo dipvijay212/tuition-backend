@@ -9,7 +9,8 @@
     "start": "node --env-file-if-exists=.env dist/index.js",
     "typecheck": "tsc --noEmit",
     "db:migrate": "tsx --env-file=.env src/db/migrate.ts",
-    "db:test": "tsx --env-file=.env src/db/test.ts"
+    "db:test": "tsx --env-file=.env src/db/test.ts",
+    "db:seed": "tsx --env-file=.env src/db/seed.ts"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
