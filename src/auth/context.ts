@@ -55,7 +55,8 @@ export async function loadSessionContext(userId: string): Promise<SessionContext
   let roles: AppRole[] = [];
   if (row.status === "active" && row.institute_id) roles = ROLE_PRIORITY.filter((r) => row!.role_list?.includes(r));
 
-  if (roles.length === 0) {
+  // Never auto-heal blocked accounts: that would undo an admin's suspension.
+  if (roles.length === 0 && row.status !== "suspended" && row.status !== "inactive") {
     const healed = await healUserRoles(userId, row.auth_email ?? row.email, row.phone ?? row.auth_phone);
     if (healed) row = (await loadRow(userId))!;
     if (row.status === "active" && row.institute_id) roles = ROLE_PRIORITY.filter((r) => row!.role_list?.includes(r));
@@ -89,7 +90,7 @@ export async function healUserRoles(userId: string, email?: string | null, phone
     const existing = await db.one<{ institute_id: string }>(`select institute_id from public.user_roles where user_id = $1 limit 1`, [userId]);
     if (existing) {
       await db.q(
-        `update public.profiles set institute_id = $2, status = 'active', email = coalesce($3, email), phone = coalesce($4, phone) where id = $1`,
+        `update public.profiles set institute_id = $2, status = case when status in ('suspended', 'inactive') then status else 'active' end, email = coalesce($3, email), phone = coalesce($4, phone) where id = $1`,
         [userId, existing.institute_id, e, p],
       );
       if (e) await linkByEmail(db, userId, existing.institute_id, e);
@@ -112,7 +113,7 @@ export async function healUserRoles(userId: string, email?: string | null, phone
       if (!person) continue;
       await db.q(
         `update public.profiles
-            set institute_id = $2, status = 'active', email = coalesce($3, $4, email),
+            set institute_id = $2, status = case when status in ('suspended', 'inactive') then status else 'active' end, email = coalesce($3, $4, email),
                 full_name = coalesce(nullif($5, ''), full_name), phone = coalesce($6, phone)
           where id = $1`,
         [userId, person.institute_id, e, person.email, person.full_name, person.phone],
