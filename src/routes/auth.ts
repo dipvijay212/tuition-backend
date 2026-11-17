@@ -142,15 +142,14 @@ authRouter.patch("/profile", authenticate, async (req, res) => {
   res.json({ message: "Profile updated" });
 });
 
-// ---------- First-run setup (only while no institute exists) ----------
+// ---------- Institute registration / setup ----------
 const isSetupComplete = async () => !!(await sys.one(`select 1 from public.institutes limit 1`));
 
 authRouter.get("/setup-status", async (_req, res) => {
   res.json({ complete: await isSetupComplete() });
 });
 
-authRouter.post("/setup", async (req, res) => {
-  if (await isSetupComplete()) throw badRequest("Setup has already been completed. Please sign in.");
+const handleRegister = async (req: import("express").Request, res: import("express").Response) => {
   const v = z
     .object({
       institute_name: requiredText("Institute name", 120),
@@ -164,10 +163,13 @@ authRouter.post("/setup", async (req, res) => {
     .parse(req.body);
   const email = v.email.toLowerCase();
 
+  const existingEmail = await sys.one<{ id: string }>(`select id from auth.users where lower(email) = $1`, [email]);
+  if (existingEmail) throw badRequest("An account with this email address already exists.");
+
+  const existingPhone = await sys.one<{ id: string }>(`select id from public.profiles where phone = $1`, [v.phone]);
+  if (existingPhone) throw badRequest("An account with this mobile number already exists.");
+
   const userId = await asSystem(async (db) => {
-    // Lock so two concurrent setups can't both succeed.
-    await db.q(`lock table public.institutes in exclusive mode`);
-    if (await db.one(`select 1 from public.institutes limit 1`)) throw badRequest("Setup has already been completed. Please sign in.");
     const inst = await db.one<{ id: string }>(`insert into public.institutes (name, phone, email) values ($1, $2, $3) returning id`, [v.institute_name, v.phone, email]);
     await db.q(`select public.seed_institute_defaults($1)`, [inst!.id]);
     const uid = await createAuthUser(db, { email, password: v.password, fullName: v.full_name, phone: v.phone, confirmed: true });
@@ -177,7 +179,10 @@ authRouter.post("/setup", async (req, res) => {
   });
   const session = await createSession(userId, true, meta(v));
   res.json({ ...session, home: "/admin/settings?welcome=1" });
-});
+};
+
+authRouter.post("/register", handleRegister);
+authRouter.post("/setup", handleRegister);
 
 /** Admin helper used by user management: force sign-out everywhere. */
 export async function signOutEverywhere(userId: string) {

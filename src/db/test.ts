@@ -1,4 +1,5 @@
 /** Runs db/tests/*.sql against DIRECT_URL. Each file must begin; ... rollback; itself. */
+import "../dns.js";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";

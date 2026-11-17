@@ -1,3 +1,4 @@
+import "./dns.js";
 import { env } from "./env.js";
 import { createApp } from "./app.js";
 import { purgeExpiredSessions } from "./auth/sessions.js";

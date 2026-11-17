@@ -2,6 +2,7 @@
  * Applies db/migrations/*.sql in name order, each in its own transaction.
  * Already-applied files are recorded in public.schema_migrations.
  */
+import "../dns.js";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";

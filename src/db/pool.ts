@@ -1,3 +1,4 @@
+import "../dns.js";
 import pg from "pg";
 import { env } from "../env.js";
 

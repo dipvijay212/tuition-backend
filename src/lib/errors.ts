@@ -1,5 +1,6 @@
 import type { ErrorRequestHandler } from "express";
 import { ZodError } from "zod";
+import { env } from "../env.js";
 
 export class HttpError extends Error {
   constructor(public status: number, message: string, public fieldErrors?: Record<string, string[]>) {
@@ -69,5 +70,6 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
     return;
   }
   console.error("[api] unhandled error", err);
-  res.status(500).json({ error: "Something went wrong. Please try again." });
+  const msg = env.isProd ? "Something went wrong. Please try again." : (err as Error)?.message || "Something went wrong. Please try again.";
+  res.status(500).json({ error: msg });
 };
