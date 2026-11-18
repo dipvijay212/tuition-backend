@@ -119,7 +119,7 @@ attendanceRouter.post("/sessions/:id/submit", staff, async (req, res, next) => {
       .parse(req.body);
     // submit_attendance enforces teacher assignment, timing and correction rules.
     const ctx = ctxOf(req);
-    await asUser(ctx.userId, (db) => db.q(`select public.submit_attendance($1, $2, $3)`, [id, JSON.stringify(v.records), v.reason]));
+    await asUser(ctx, (db) => db.q(`select public.submit_attendance($1, $2, $3)`, [id, JSON.stringify(v.records), v.reason]));
     const saved = await asSystem((db) => db.one<{ n: number }>(`select count(*)::int as n from public.attendance where session_id = $1`, [id]));
     res.json({ message: `Attendance saved for ${saved?.n ?? v.records.length} students!` });
     // Absence emails (best effort, after responding).

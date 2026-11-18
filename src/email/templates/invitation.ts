@@ -6,6 +6,8 @@ export type InvitationEmailProps = {
   recipientEmail: string;
   role: "admin" | "teacher" | "student" | "parent";
   actionLink: string;
+  /** Institute code people type on the sign-in page. */
+  instituteCode?: string;
 };
 
 const ROLE_LABELS: Record<string, string> = {
@@ -38,6 +40,11 @@ export function renderInvitationEmail(props: InvitationEmailProps): { subject: s
         <span class="info-label">Account Email</span>
         <span class="info-value">${escapeHtml(props.recipientEmail)}</span>
       </div>
+      ${props.instituteCode ? `
+      <div class="info-row">
+        <span class="info-label">Institute Code</span>
+        <span class="info-value" style="font-family: monospace; letter-spacing: 1px;">${escapeHtml(props.instituteCode)}</span>
+      </div>` : ""}
       <div class="info-row">
         <span class="info-label">Portal Access</span>
         <span class="info-value" style="color: #60a5fa;">${escapeHtml(roleLabel)} Portal</span>
@@ -73,7 +80,7 @@ export function renderInvitationEmail(props: InvitationEmailProps): { subject: s
 An account has been created for you as a ${roleLabel}.
 
 Name: ${props.recipientName}
-Email: ${props.recipientEmail}
+Email: ${props.recipientEmail}${props.instituteCode ? `\nInstitute code: ${props.instituteCode} (you will need it to sign in)` : ""}
 
 To activate your account and choose your password, please open the following link in your browser:
 ${props.actionLink}

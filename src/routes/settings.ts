@@ -53,7 +53,7 @@ settingsRouter.post("/profile", upload.any(), async (req, res) => {
     logoPath = `${ctx.institute.id}/${safeFileName(logo.originalname)}`;
     await putFile("branding", logoPath, logo.buffer);
   }
-  await asUser(ctx.userId, async (db) => {
+  await asUser(ctx, async (db) => {
     await db.q(
       `update public.institutes set name = $2, address = $3, phone = $4, email = $5, website = $6, logo_path = coalesce($7, logo_path) where id = $1`,
       [ctx.institute.id, v.name, v.address, v.phone, v.email, v.website, logoPath],

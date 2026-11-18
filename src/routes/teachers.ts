@@ -8,6 +8,7 @@ import { putFile, signedUrl } from "../lib/storage.js";
 import { provisionAccount } from "../auth/provision.js";
 import { passwordSchema } from "../lib/validation.js";
 import { asSystem, asUser } from "../db/pool.js";
+import { revokeInstituteSessions } from "../auth/sessions.js";
 import { ctxOf } from "../middleware.js";
 
 export const teachersRouter = Router();
@@ -116,7 +117,7 @@ teachersRouter.post("/", admin, upload.any(), async (req, res) => {
   const ctx = ctxOf(req);
   const inst = ctx.institute.id;
 
-  const saved = await asUser(ctx.userId, async (db) => {
+  const saved = await asUser(ctx, async (db) => {
     const vals = [inst, v.full_name, v.phone, v.email, v.address, v.qualification, v.specialization, v.subject_ids, v.joining_date, v.employment_status, v.monthly_salary];
     const row = v.id
       ? await db.one<{ id: string; profile_id: string | null }>(
@@ -147,7 +148,8 @@ teachersRouter.post("/", admin, upload.any(), async (req, res) => {
   }
   // Deactivating staff: suspend login too (history is kept).
   if (saved.profile_id && ["resigned", "terminated"].includes(v.employment_status)) {
-    await asSystem((db) => db.q(`update public.profiles set status = 'inactive' where id = $1`, [saved.profile_id]));
+    await asSystem((db) => db.q(`update public.memberships set status = 'inactive' where user_id = $1 and institute_id = $2`, [saved.profile_id, ctx.institute.id]));
+    await revokeInstituteSessions(saved.profile_id, ctx.institute.id);
   }
   res.json({ message, id: saved.id });
 });

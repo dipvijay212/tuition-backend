@@ -151,7 +151,7 @@ studentsRouter.post("/admit", admin, async (req, res) => {
     })
     .parse(req.body);
   const { create_parent_login, create_student_login, ...payload } = v;
-  const result = await asUser(ctx.userId, async (db) => {
+  const result = await asUser(ctx, async (db) => {
     const r = await db.one<{ r: { student_id: string; admission_no: string; obligations_created: number } }>(`select public.admit_student($1) as r`, [JSON.stringify(payload)]);
     return r!.r;
   });
@@ -270,7 +270,7 @@ studentsRouter.post("/:id/documents", admin, upload.any(), async (req, res) => {
   const title = String((jsonField(req) as { title?: string }).title ?? "").trim();
   const file = fileField(req, "file");
   if (!title) throw badRequest("Enter a document title.");
-  await asUser(ctx.userId, async (db) => {
+  await asUser(ctx, async (db) => {
     const st = await db.one<{ max_upload_mb: number }>(
       `select st.max_upload_mb from public.institute_settings st where st.institute_id = $1 and exists (select 1 from public.students s where s.id = $2 and s.institute_id = $1)`,
       [ctx.institute.id, id],
@@ -294,7 +294,7 @@ studentsRouter.post("/:id/photo", admin, upload.any(), async (req, res) => {
   const file = fileField(req, "file");
   const err = validateUpload(file, 2, ["image/png", "image/jpeg", "image/webp"]);
   if (err) throw badRequest(err);
-  await asUser(ctx.userId, async (db) => {
+  await asUser(ctx, async (db) => {
     const path = `${ctx.institute.id}/students/${id}/photo-${safeFileName(file!.originalname)}`;
     const r = await db.q(`update public.students set photo_path = $3 where id = $1 and institute_id = $2 returning id`, [id, ctx.institute.id, path]);
     if (!r.length) throw notFound("Student not found.");
@@ -308,7 +308,7 @@ studentsRouter.post("/family-login", admin, async (req, res) => {
   const ctx = ctxOf(req);
   const v = z.object({ kind: z.enum(["student", "parent"]), id: z.uuid() }).parse(req.body);
   const table = v.kind === "student" ? "students" : "guardians";
-  const p = await asUser(ctx.userId, (db) =>
+  const p = await asUser(ctx, (db) =>
     db.one<{ id: string; full_name: string; email: string | null; phone: string | null; profile_id: string | null }>(
       `select id, full_name, email, phone, profile_id from public.${table} where id = $1 and institute_id = $2`,
       [v.id, ctx.institute.id],

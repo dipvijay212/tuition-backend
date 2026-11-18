@@ -67,7 +67,7 @@ learningRouter.post("/homework", staff, async (req, res) => {
       due_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Please choose a due date."),
     })
     .parse(req.body);
-  await asUser(ctx.userId, async (db) => {
+  await asUser(ctx, async (db) => {
     await assertBatch(db, ctx, v.batch_id);
     await db.q(
       `insert into public.homework (institute_id, batch_id, subject_id, title, description, assigned_date, due_at, is_published, submission_enabled, created_by)
@@ -220,7 +220,7 @@ learningRouter.post("/materials", staff, upload.any(), async (req, res) => {
   const err = validateUpload(file, 25, Object.keys(ALLOWED_UPLOADS));
   if (err) throw badRequest(err);
   const path = `${ctx.institute.id}/materials/${safeFileName(file!.originalname)}`;
-  await asUser(ctx.userId, async (db) => {
+  await asUser(ctx, async (db) => {
     if (v.batch_id) await assertBatch(db, ctx, v.batch_id);
     else if (!isAdmin(ctx) && !(await db.one(`select 1 from public.batches where class_id = $1 and id in (select public.my_batch_ids())`, [v.class_id]))) {
       throw forbidden("Choose one of your classes.");
@@ -238,7 +238,7 @@ learningRouter.post("/materials", staff, upload.any(), async (req, res) => {
 learningRouter.delete("/materials/:id", staff, async (req, res) => {
   const ctx = ctxOf(req);
   const id = z.uuid().parse(req.params.id);
-  const item = await asUser(ctx.userId, async (db) => {
+  const item = await asUser(ctx, async (db) => {
     const m = await db.one<{ file_path: string | null }>(
       `update public.study_materials set is_active = false
         where id = $1 and institute_id = $2 and ($3::boolean or uploaded_by = $4) returning file_path`,

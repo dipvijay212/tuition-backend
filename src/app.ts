@@ -1,6 +1,8 @@
 import express from "express";
 import { errorHandler, notFound } from "./lib/errors.js";
-import { authenticate, requireInternalKey } from "./middleware.js";
+import { authenticate, requireInternalKey, requireTenant } from "./middleware.js";
+import { platformRouter } from "./routes/platform.js";
+import { subscriptionRouter } from "./routes/subscription.js";
 import { authRouter } from "./routes/auth.js";
 import { filesRouter } from "./routes/files.js";
 import { notificationsRouter } from "./routes/notifications.js";
@@ -34,6 +36,12 @@ export function createApp() {
 
   // Everything below requires a signed-in user.
   app.use(authenticate);
+  app.use("/platform", platformRouter); // platform staff only
+
+  // Institute (tenant) API: suspended institutes are blocked, expired subscriptions are read-only,
+  // and plan features gate their route groups. Data isolation is also enforced by Postgres RLS.
+  app.use(requireTenant);
+  app.use("/subscription", subscriptionRouter);
   app.use("/notifications", notificationsRouter);
   app.use("/academics", academicsRouter);
   app.use("/batches", batchesRouter);

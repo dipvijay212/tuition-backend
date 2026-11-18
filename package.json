@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "db:migrate": "tsx --env-file=.env src/db/migrate.ts",
     "db:test": "tsx --env-file=.env src/db/test.ts",
-    "db:seed": "tsx --env-file=.env src/db/seed.ts"
+    "db:seed": "tsx --env-file=.env src/db/seed.ts",
+    "platform:admin": "tsx --env-file=.env src/db/platform-admin.ts"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

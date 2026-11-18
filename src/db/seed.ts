@@ -13,6 +13,7 @@ import { putFile } from "../lib/storage.js";
 
 const ADMIN = { name: "Dipvijay Rathod", email: "admin@example.com", phone: "9825012345", password: "Admin@1234" };
 const DEMO_PASSWORD = "Demo@1234";
+const INSTITUTE_CODE = "DEMO2026";
 const TODAY = new Date().toISOString().slice(0, 10);
 
 // ---------- deterministic randomness ----------
@@ -153,11 +154,13 @@ async function createLogins(inst: string, teacherId: Record<string, string>) {
   });
 }
 
+const pendingFiles: { path: string; buf: Buffer }[] = [];
+
 async function main() {
   if (process.argv.includes("--reset")) {
     // DEMO DATABASES ONLY: wipes every app table and all logins, then re-seeds.
     const { rows } = await pool.query<{ t: string }>(
-      `select format('%I.%I', schemaname, tablename) as t from pg_tables where schemaname = 'public' and tablename <> 'schema_migrations'`,
+      `select format('%I.%I', schemaname, tablename) as t from pg_tables where schemaname = 'public' and tablename not in ('schema_migrations', 'plans')`,
     );
     await pool.query(`truncate ${rows.map((r) => r.t).join(", ")}, auth.users, auth.sessions, auth.one_time_tokens restart identity cascade`);
     console.log("Reset: all data removed.");
@@ -171,10 +174,17 @@ async function main() {
   // ---------- Institute, admin, staff logins (system) ----------
   const { inst, adminId } = await asSystem(async (db) => {
     const inst = (await db.one<{ id: string }>(
-      `insert into public.institutes (name, address, phone, email, website)
-       values ('Shree Vidya Coaching Classes', '2nd Floor, Shivalik Plaza, Near IIM Road, Ambawadi, Ahmedabad, Gujarat 380015', '07926301234', 'info@example.com', 'www.example.com') returning id`,
+      `insert into public.institutes (name, code, address, phone, email, website)
+       values ('Shree Vidya Coaching Classes', $1, '2nd Floor, Shivalik Plaza, Near IIM Road, Ambawadi, Ahmedabad, Gujarat 380015', '07926301234', 'info@example.com', 'www.example.com') returning id`,
+      [INSTITUTE_CODE],
     ))!.id;
     await db.q(`select public.seed_institute_defaults($1)`, [inst]);
+    // Demo institute: Pro plan, paid for a year.
+    await db.q(
+      `insert into public.subscriptions (institute_id, plan_id, status, billing_cycle, current_period_end)
+       select $1, id, 'active', 'yearly', current_date + 365 from public.plans where code = 'pro'`,
+      [inst],
+    );
     await db.q(
       `update public.institute_settings set receipt_footer = 'Fees once paid are not refundable. Thank you for choosing Shree Vidya Coaching Classes.',
               late_fee_enabled = true, late_fee_type = 'fixed', late_fee_value = 100, late_fee_grace_days = 5 where institute_id = $1`,
@@ -185,7 +195,7 @@ async function main() {
   });
 
   // ---------- Structure, staff and admissions as the admin (auth.uid() = admin) ----------
-  const setup = await asUser(adminId, async (db) => {
+  const setup = await asUser({ userId: adminId, instituteId: inst }, async (db) => {
     const year = (await db.one<{ id: string }>(
       `insert into public.academic_years (institute_id, name, start_date, end_date, is_current) values ($1, '2026-27', '2026-06-01', '2027-03-31', true) returning id`,
       [inst],
@@ -331,7 +341,7 @@ async function main() {
   const logins = await createLogins(inst, setup.teacherId);
 
   // ---------- Day-to-day activity as the admin ----------
-  const summary = await asUser(adminId, async (db) => {
+  const summary = await asUser({ userId: adminId, instituteId: inst }, async (db) => {
     const { year, classId, subjectId, batchIds, admitted, teacherId } = setup;
 
     // ---------- Payments ----------
@@ -476,7 +486,7 @@ async function main() {
     for (const [cls, s, title, lines] of MATERIALS) {
       const path = `${inst}/materials/${Date.now()}-${slug(title).replace(/\./g, "-")}.pdf`;
       const buf = pdf(title, ["Shree Vidya Coaching Classes", "", ...lines]);
-      await putFile("files", path, buf);
+      pendingFiles.push({ path, buf }); // written after the transaction commits
       await db.q(
         `insert into public.study_materials (institute_id, title, description, class_id, subject_id, file_path, mime_type, size_bytes, visibility, uploaded_by, is_active, created_at)
          values ($1, $2, $3, $4, $5, $6, 'application/pdf', $7, 'class', $8, true, now() - make_interval(days => $9))`,
@@ -524,10 +534,12 @@ async function main() {
 
     return { admitted, payments, marked, published, hwCount };
   });
+  for (const f of pendingFiles) await putFile("files", f.path, f.buf);
 
 
   console.log(`\nDone: ${summary.admitted.length} students, ${TEACHERS.length} teachers, ${BATCHES.length} batches, ${summary.payments} payments,`);
   console.log(`      ${summary.marked} attendance sessions, ${summary.published} published exams, ${summary.hwCount} homework.\n`);
+  console.log(`Institute code: ${INSTITUTE_CODE}   (enter it on the sign-in page)\n`);
   console.log("Logins:");
   console.log(`  Admin                 ${ADMIN.email.padEnd(40)} ${ADMIN.password}`);
   for (const l of logins) console.log(`  ${l.role.padEnd(21)} ${l.email.padEnd(40)} ${DEMO_PASSWORD}   (${l.name})`);
