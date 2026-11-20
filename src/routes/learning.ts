@@ -220,12 +220,15 @@ learningRouter.post("/materials", staff, upload.any(), async (req, res) => {
   const err = validateUpload(file, 25, Object.keys(ALLOWED_UPLOADS));
   if (err) throw badRequest(err);
   const path = `${ctx.institute.id}/materials/${safeFileName(file!.originalname)}`;
+  // Check access, write the file outside any transaction (putFile uses its own connection), then record it.
   await asUser(ctx, async (db) => {
     if (v.batch_id) await assertBatch(db, ctx, v.batch_id);
     else if (!isAdmin(ctx) && !(await db.one(`select 1 from public.batches where class_id = $1 and id in (select public.my_batch_ids())`, [v.class_id]))) {
       throw forbidden("Choose one of your classes.");
     }
-    await putFile("files", path, file!.buffer);
+  });
+  await putFile("files", path, file!.buffer);
+  await asUser(ctx, async (db) => {
     await db.q(
       `insert into public.study_materials (institute_id, title, description, class_id, batch_id, subject_id, file_path, mime_type, size_bytes, visibility, uploaded_by, is_active)
        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, true)`,

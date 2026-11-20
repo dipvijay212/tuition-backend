@@ -54,3 +54,21 @@ students use `Demo@1234` (the seed prints the list).
 - **Speed**: each request resolves session, profile, membership, roles, institute and subscription in **one query**,
   cached in-process for 10 s (cleared on logout, role/status/plan changes). `asUser` sends begin + role + settings in one
   round trip. RLS policies evaluate the caller's institute once per statement.
+
+## Data integrity (migration `0015_integrity.sql`)
+- Every reference between institute tables (batch → class, student → class, timetable → teacher, …) is checked by a
+  trigger to point at a row of the **same institute**; `students/teachers.subject_ids` too. Foreign keys and RLS alone
+  don't catch an id copied from another institute.
+- Attendance can't be recorded for a future date (also for admins), so parents never get false "absent" alerts.
+- Uploaded files are written **outside** database transactions (`putFile` uses its own connection for quota bookkeeping).
+
+## Fee reminders & late fees (migration `0016_fee_reminders.sql`, `src/jobs/fee-reminders.ts`)
+- Runs inside the API every 30 minutes; sends after `FEE_REMINDER_HOUR` (default 9) in each institute's timezone.
+  Per-institute settings decide the days: *days before due*, *on the due date*, *days after due*.
+- For each student: in-app notification to the student and linked parents, plus **one email** listing all their due fees
+  (only when the institute has email enabled; people who turned off fee-reminder emails are skipped).
+- `fee_reminder_log` guarantees each fee gets each reminder **at most once**, even with many runs or several servers.
+- Late fees (`apply_late_fees`) are added first, only for institutes that enabled them and fee structures marked late-fee applicable.
+- Suspended/expired institutes and inactive students are skipped. Paid fees are never reminded.
+- Hosts that sleep: call `POST /cron/fee-reminders` daily with `x-cron-secret: $CRON_SECRET` (or `Authorization: Bearer`).
+  `JOBS_DISABLED=true` turns off the in-process schedule.

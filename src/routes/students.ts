@@ -270,21 +270,24 @@ studentsRouter.post("/:id/documents", admin, upload.any(), async (req, res) => {
   const title = String((jsonField(req) as { title?: string }).title ?? "").trim();
   const file = fileField(req, "file");
   if (!title) throw badRequest("Enter a document title.");
-  await asUser(ctx, async (db) => {
-    const st = await db.one<{ max_upload_mb: number }>(
+  // Check first, write the file outside any transaction (putFile uses its own connection), then record it.
+  const st = await asUser(ctx, (db) =>
+    db.one<{ max_upload_mb: number }>(
       `select st.max_upload_mb from public.institute_settings st where st.institute_id = $1 and exists (select 1 from public.students s where s.id = $2 and s.institute_id = $1)`,
       [ctx.institute.id, id],
-    );
-    if (!st) throw notFound("Student not found.");
-    const err = validateUpload(file, st.max_upload_mb ?? 10, ["application/pdf", "image/png", "image/jpeg", "image/webp"]);
-    if (err) throw badRequest(err);
-    const path = `${ctx.institute.id}/students/${id}/${safeFileName(file!.originalname)}`;
-    await putFile("files", path, file!.buffer);
-    await db.q(
+    ),
+  );
+  if (!st) throw notFound("Student not found.");
+  const err = validateUpload(file, st.max_upload_mb ?? 10, ["application/pdf", "image/png", "image/jpeg", "image/webp"]);
+  if (err) throw badRequest(err);
+  const path = `${ctx.institute.id}/students/${id}/${safeFileName(file!.originalname)}`;
+  await putFile("files", path, file!.buffer);
+  await asUser(ctx, (db) =>
+    db.q(
       `insert into public.student_documents (institute_id, student_id, title, file_path, mime_type, size_bytes, uploaded_by) values ($1, $2, $3, $4, $5, $6, $7)`,
       [ctx.institute.id, id, title, path, file!.mimetype, file!.size, ctx.userId],
-    );
-  });
+    ),
+  );
   res.json({ message: "Document uploaded" });
 });
 
@@ -294,12 +297,11 @@ studentsRouter.post("/:id/photo", admin, upload.any(), async (req, res) => {
   const file = fileField(req, "file");
   const err = validateUpload(file, 2, ["image/png", "image/jpeg", "image/webp"]);
   if (err) throw badRequest(err);
-  await asUser(ctx, async (db) => {
-    const path = `${ctx.institute.id}/students/${id}/photo-${safeFileName(file!.originalname)}`;
-    const r = await db.q(`update public.students set photo_path = $3 where id = $1 and institute_id = $2 returning id`, [id, ctx.institute.id, path]);
-    if (!r.length) throw notFound("Student not found.");
-    await putFile("files", path, file!.buffer);
-  });
+  const exists = await asUser(ctx, (db) => db.one(`select 1 from public.students where id = $1 and institute_id = $2`, [id, ctx.institute.id]));
+  if (!exists) throw notFound("Student not found.");
+  const path = `${ctx.institute.id}/students/${id}/photo-${safeFileName(file!.originalname)}`;
+  await putFile("files", path, file!.buffer);
+  await asUser(ctx, (db) => db.q(`update public.students set photo_path = $3 where id = $1 and institute_id = $2`, [id, ctx.institute.id, path]));
   res.json({ message: "Photo updated" });
 });
 

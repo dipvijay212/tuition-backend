@@ -66,9 +66,9 @@ teachersRouter.get(
     const id = z.uuid().parse(req.params.id);
     const t = await db.one<{ photo_path: string | null; subject_ids: string[] }>(`select * from public.teachers where id = $1 and institute_id = $2`, [id, inst]);
     if (!t) return { teacher: null };
-    const [subjects, batches, attendance] = await Promise.all([
-      db.q(`select id, name from public.subjects where id = any($1::uuid[]) and institute_id = $2`, [t.subject_ids ?? [], inst]),
-      db.q(
+    // Sequential: one connection per transaction (parallel queries on one pg client are deprecated and break in pg@9).
+    const subjects = await db.q(`select id, name from public.subjects where id = any($1::uuid[]) and institute_id = $2`, [t.subject_ids ?? [], inst]);
+    const batches = await db.q(
         `select tb.id, tb.start_date, tb.is_active,
                 json_build_object('id', b.id, 'name', b.name, 'start_time', b.start_time, 'end_time', b.end_time, 'class_days', b.class_days,
                   'classes', case when c.id is null then null else json_build_object('name', c.name) end,
@@ -76,10 +76,8 @@ teachersRouter.get(
            from public.teacher_batches tb join public.batches b on b.id = tb.batch_id left join public.classes c on c.id = b.class_id
           where tb.teacher_id = $1 order by tb.is_active desc`,
         [id],
-      ),
-      db.q(`select attendance_date, status, remarks from public.teacher_attendance where teacher_id = $1 order by attendance_date desc limit 10`, [id]),
-    ]);
-    // Sequential: one client per transaction.
+    );
+    const attendance = await db.q(`select attendance_date, status, remarks from public.teacher_attendance where teacher_id = $1 order by attendance_date desc limit 10`, [id]);
     return { teacher: t, subjects, batches, attendance, photoUrl: t.photo_path ? signedUrl(t.photo_path) : null };
   }),
 );
@@ -132,13 +130,15 @@ teachersRouter.post("/", admin, upload.any(), async (req, res) => {
           vals,
         );
     if (!row) throw notFound("Teacher not found.");
-    if (photo) {
-      const path = `${inst}/teachers/${row.id}/photo-${Date.now()}.${photo.mimetype.split("/")[1]}`;
-      await putFile("files", path, photo.buffer);
-      await db.q(`update public.teachers set photo_path = $2 where id = $1`, [row.id, path]);
-    }
     return row;
   });
+  // Files are written outside the transaction: putFile uses its own connection for quota bookkeeping,
+  // and holding one connection while waiting for another can exhaust the pool under load.
+  if (photo) {
+    const path = `${inst}/teachers/${saved.id}/photo-${Date.now()}.${photo.mimetype.split("/")[1]}`;
+    await putFile("files", path, photo.buffer);
+    await asUser(ctx, (db) => db.q(`update public.teachers set photo_path = $2 where id = $1 and institute_id = $3`, [saved.id, path, inst]));
+  }
 
   let message = v.id ? "Teacher updated" : "Teacher added";
   if (v.account_mode !== "none" && !saved.profile_id) {

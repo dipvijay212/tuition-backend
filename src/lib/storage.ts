@@ -65,8 +65,8 @@ async function assertQuota(instituteId: string, extra: number) {
   if (plan?.storage_mb == null) return;
   const used = await storageUsed(instituteId);
   if (used + extra > plan.storage_mb * 1024 * 1024) {
-    const gb = (plan.storage_mb / 1024).toFixed(plan.storage_mb % 1024 ? 1 : 0);
-    throw new HttpError(402, `Your plan's storage limit (${gb} GB) is full. Delete old files or upgrade your plan.`);
+    const size = plan.storage_mb >= 1024 ? `${(plan.storage_mb / 1024).toFixed(plan.storage_mb % 1024 ? 1 : 0)} GB` : `${plan.storage_mb} MB`;
+    throw new HttpError(402, `Your plan's storage limit (${size}) is full. Delete old files or upgrade your plan.`);
   }
 }
 

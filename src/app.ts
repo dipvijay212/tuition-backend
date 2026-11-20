@@ -19,6 +19,7 @@ import { settingsRouter } from "./routes/settings.js";
 import { feesRouter } from "./routes/fees.js";
 import { examsRouter } from "./routes/exams.js";
 import { learningRouter } from "./routes/learning.js";
+import { cronRouter } from "./routes/cron.js";
 
 export function createApp() {
   const app = express();
@@ -29,6 +30,9 @@ export function createApp() {
   app.get("/health", (_req, res) => {
     res.json({ ok: true });
   });
+
+  // Scheduled jobs (external cron); protected by CRON_SECRET, not the internal key.
+  app.use("/cron", cronRouter);
 
   app.use(requireInternalKey);
   app.use("/auth", authRouter);
