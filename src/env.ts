@@ -15,4 +15,15 @@ export const env = {
   cronSecret: process.env.CRON_SECRET ?? "",
   storageDir: process.env.STORAGE_DIR ?? "./uploads",
   isProd: process.env.NODE_ENV === "production",
+  cloudinary: {
+    cloudName: process.env.CLOUDINARY_CLOUD_NAME ?? "",
+    apiKey: process.env.CLOUDINARY_API_KEY ?? "",
+    apiSecret: process.env.CLOUDINARY_API_SECRET ?? "",
+    enabled: Boolean(
+      process.env.CLOUDINARY_CLOUD_NAME &&
+        process.env.CLOUDINARY_API_KEY &&
+        process.env.CLOUDINARY_API_SECRET &&
+        process.env.CLOUDINARY_API_KEY !== "your_api_key"
+    ),
+  },
 };

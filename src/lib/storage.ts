@@ -1,19 +1,80 @@
 /**
- * File storage on local disk (STORAGE_DIR/<bucket>/<path>).
+ * File storage supporting Cloudinary cloud storage with local disk caching.
  * Buckets: "files" (private, served via short-lived signed URLs) and "branding" (public logos).
- * The browser never talks to this API: URLs point at the Next.js route /api/files/..., which proxies here.
- * To move to S3/R2 later, only this module changes.
+ * The browser never talks directly to storage: URLs point at the Next.js route /api/files/..., which proxies here.
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { Readable } from "node:stream";
 import path from "node:path";
+import { v2 as cloudinary } from "cloudinary";
 import { env } from "../env.js";
 import { badRequest, HttpError } from "./errors.js";
 import { sys } from "../db/pool.js";
 
+if (env.cloudinary.enabled) {
+  cloudinary.config({
+    cloud_name: env.cloudinary.cloudName,
+    api_key: env.cloudinary.apiKey,
+    api_secret: env.cloudinary.apiSecret,
+    secure: true,
+  });
+}
+
 export type Bucket = "files" | "branding";
 const root = path.resolve(env.storageDir);
+
+const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "webp", "gif", "svg"]);
+
+function cloudinaryResourceType(filePath: string): "image" | "raw" {
+  const ext = filePath.split(".").pop()?.toLowerCase() ?? "";
+  return IMAGE_EXTS.has(ext) ? "image" : "raw";
+}
+
+function cloudinaryPublicId(bucket: Bucket, p: string): string {
+  const cleanPath = p.replace(/\\/g, "/");
+  const isImage = cloudinaryResourceType(p) === "image";
+  if (isImage) {
+    return `tuition/${bucket}/${cleanPath.replace(/\.[^.]+$/, "")}`;
+  }
+  return `tuition/${bucket}/${cleanPath}`;
+}
+
+async function uploadToCloudinary(bucket: Bucket, p: string, data: Buffer): Promise<void> {
+  if (!env.cloudinary.enabled) return;
+  const resourceType = cloudinaryResourceType(p);
+  const publicId = cloudinaryPublicId(bucket, p);
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        public_id: publicId,
+        resource_type: resourceType,
+        overwrite: true,
+      },
+      (error) => {
+        if (error) {
+          console.error("[storage] cloudinary upload failed:", error);
+          reject(error);
+        } else {
+          resolve();
+        }
+      }
+    );
+    stream.end(data);
+  });
+}
+
+async function deleteFromCloudinary(bucket: Bucket, p: string): Promise<void> {
+  if (!env.cloudinary.enabled) return;
+  const resourceType = cloudinaryResourceType(p);
+  const publicId = cloudinaryPublicId(bucket, p);
+  try {
+    await cloudinary.uploader.destroy(publicId, { resource_type: resourceType });
+  } catch (err) {
+    console.error("[storage] cloudinary destroy failed:", err);
+  }
+}
 
 function resolvePath(bucket: Bucket, p: string) {
   if (!p || p.includes("\0") || p.split("/").some((s) => s === ".." || s === "")) throw badRequest("Invalid file path.");
@@ -75,8 +136,19 @@ export async function putFile(bucket: Bucket, p: string, data: Buffer, upsert = 
   const inst = instituteOf(p);
   const previous = upsert ? ((await stat(full).catch(() => null))?.size ?? 0) : 0;
   if (inst) await assertQuota(inst, data.length - previous);
+
+  // 1. Write to local storage
   await mkdir(path.dirname(full), { recursive: true });
   await writeFile(full, data, { flag: upsert ? "w" : "wx" });
+
+  // 2. Upload to Cloudinary
+  if (env.cloudinary.enabled) {
+    await uploadToCloudinary(bucket, p, data).catch((e) => {
+      console.error("[storage] Cloudinary upload error:", e);
+    });
+  }
+
+  // 3. Track quota
   if (inst) await addUsage(inst, data.length - previous).catch((e) => console.error("[storage] usage update failed", e));
 }
 
@@ -86,6 +158,9 @@ export async function removeFiles(bucket: Bucket, paths: string[]) {
       const full = resolvePath(bucket, p);
       const size = (await stat(full).catch(() => null))?.size ?? 0;
       await rm(full, { force: true });
+      if (env.cloudinary.enabled) {
+        await deleteFromCloudinary(bucket, p).catch(() => {});
+      }
       const inst = instituteOf(p);
       if (inst && size) await addUsage(inst, -size).catch((e) => console.error("[storage] usage update failed", e));
     }),
@@ -95,8 +170,30 @@ export async function removeFiles(bucket: Bucket, paths: string[]) {
 export async function openFile(bucket: Bucket, p: string) {
   const full = resolvePath(bucket, p);
   const s = await stat(full).catch(() => null);
-  if (!s?.isFile()) return null;
-  return { size: s.size, stream: createReadStream(full) };
+  if (s?.isFile()) return { size: s.size, stream: createReadStream(full) };
+
+  // If local file is missing, stream from Cloudinary
+  if (env.cloudinary.enabled) {
+    const resourceType = cloudinaryResourceType(p);
+    const publicId = cloudinaryPublicId(bucket, p);
+    const url = cloudinary.url(publicId, {
+      resource_type: resourceType,
+      secure: true,
+    });
+    try {
+      const res = await fetch(url);
+      if (res.ok && res.body) {
+        const arrayBuf = await res.arrayBuffer();
+        await mkdir(path.dirname(full), { recursive: true }).catch(() => {});
+        await writeFile(full, Buffer.from(arrayBuf)).catch(() => {});
+        return { size: arrayBuf.byteLength, stream: Readable.from(Buffer.from(arrayBuf)) };
+      }
+    } catch (e) {
+      console.error("[storage] Cloudinary fetch error:", e);
+    }
+  }
+
+  return null;
 }
 
 const sign = (p: string, exp: number) => createHmac("sha256", env.internalKey).update(`files/${p}:${exp}`).digest("base64url");

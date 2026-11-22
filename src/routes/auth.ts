@@ -79,7 +79,7 @@ authRouter.get("/institute/:code", async (req, res) => {
   res.json({ name: inst.name, code: inst.code, logo_path: inst.logo_path });
 });
 
-// ---------- Login (institute code + mobile/email + password) ----------
+// ---------- Login (auto-detect institute or explicit institute code) ----------
 authRouter.post("/login", async (req, res) => {
   const body = z
     .object({
@@ -95,27 +95,127 @@ authRouter.post("/login", async (req, res) => {
   const throttleKey = `${body.ip ?? "?"}|${body.identifier.toLowerCase()}`;
   loginThrottle.check(throttleKey);
 
-  const inst = await instituteForLogin(body.institute_code);
-
+  const rawCode = body.institute_code.trim();
+  let inst: Institute | null = null;
   let email = body.identifier.toLowerCase();
   let phone: string | null = null;
-  if (!body.identifier.includes("@")) {
-    phone = normalizePhone(body.identifier);
-    if (!/^\d{10}$/.test(phone)) throw badRequest(GENERIC);
-    const resolved = await emailForPhone(phone, inst.id);
-    if (!resolved) {
+  let user: { id: string; encrypted_password: string | null; banned_until: Date | null } | null = null;
+
+  if (rawCode) {
+    // 1. Explicit institute code provided (from URL or manual selection)
+    inst = await instituteForLogin(rawCode);
+
+    if (!body.identifier.includes("@")) {
+      phone = normalizePhone(body.identifier);
+      if (!/^\d{10}$/.test(phone)) throw badRequest(GENERIC);
+      const resolved = await emailForPhone(phone, inst.id);
+      if (!resolved) {
+        loginThrottle.fail(throttleKey);
+        throw badRequest(GENERIC);
+      }
+      email = resolved;
+    }
+
+    user = await verifyLogin(email, body.password);
+    if (!user) {
       loginThrottle.fail(throttleKey);
       throw badRequest(GENERIC);
     }
-    email = resolved;
+    loginThrottle.reset(throttleKey);
+  } else {
+    // 2. Auto-detect institute by Email or Phone (Slack / Notion style)
+    if (body.identifier.includes("@")) {
+      user = await verifyLogin(email, body.password);
+      if (!user) {
+        loginThrottle.fail(throttleKey);
+        throw badRequest(GENERIC);
+      }
+      loginThrottle.reset(throttleKey);
+
+      const institutes = await sys.q<Institute>(
+        `select distinct i.id, i.name, i.code, i.status, i.logo_path
+           from public.institutes i
+          where i.status = 'active'
+            and (
+              exists (select 1 from public.memberships m where m.institute_id = i.id and m.user_id = $1)
+              or exists (select 1 from public.user_roles ur where ur.institute_id = i.id and ur.user_id = $1)
+              or exists (select 1 from public.guardians g where g.institute_id = i.id and (g.profile_id = $1 or lower(g.email) = $2))
+              or exists (select 1 from public.students s where s.institute_id = i.id and (s.profile_id = $1 or lower(s.email) = $2))
+              or exists (select 1 from public.teachers t where t.institute_id = i.id and (t.profile_id = $1 or lower(t.email) = $2))
+            )
+          order by i.name asc`,
+        [user.id, email],
+      );
+
+      if (institutes.length === 0) {
+        const isPlatform = await sys.one<{ user_id: string }>(
+          `select user_id from public.platform_admins where user_id = $1`,
+          [user.id],
+        );
+        if (isPlatform) {
+          throw badRequest("This is a Platform Super Admin account. Please sign in at /platform/login.");
+        }
+        throw badRequest("No active institute found for this account. Please check your credentials or contact your institute.");
+      }
+
+      if (institutes.length > 1) {
+        return res.json({
+          requires_institute_selection: true,
+          institutes: institutes.map((i) => ({ id: i.id, name: i.name, code: i.code, logo_path: i.logo_path })),
+        });
+      }
+
+      inst = institutes[0];
+    } else {
+      phone = normalizePhone(body.identifier);
+      if (!/^\d{10}$/.test(phone)) throw badRequest(GENERIC);
+
+      const matchingInstitutes = await sys.q<Institute>(
+        `select distinct i.id, i.name, i.code, i.status, i.logo_path
+           from public.institutes i
+          where i.status = 'active'
+            and (
+              exists (select 1 from public.profiles p join public.memberships m on m.user_id = p.id where m.institute_id = i.id and p.phone = $1)
+              or exists (select 1 from public.guardians g where g.institute_id = i.id and g.phone = $1)
+              or exists (select 1 from public.students s where s.institute_id = i.id and s.phone = $1)
+              or exists (select 1 from public.teachers t where t.institute_id = i.id and t.phone = $1)
+            )
+          order by i.name asc`,
+        [phone],
+      );
+
+      if (matchingInstitutes.length === 0) {
+        loginThrottle.fail(throttleKey);
+        throw badRequest(GENERIC);
+      }
+
+      if (matchingInstitutes.length > 1) {
+        return res.json({
+          requires_institute_selection: true,
+          institutes: matchingInstitutes.map((i) => ({ id: i.id, name: i.name, code: i.code, logo_path: i.logo_path })),
+        });
+      }
+
+      inst = matchingInstitutes[0];
+      const resolved = await emailForPhone(phone, inst.id);
+      if (!resolved) {
+        loginThrottle.fail(throttleKey);
+        throw badRequest(GENERIC);
+      }
+      email = resolved;
+
+      user = await verifyLogin(email, body.password);
+      if (!user) {
+        loginThrottle.fail(throttleKey);
+        throw badRequest(GENERIC);
+      }
+      loginThrottle.reset(throttleKey);
+    }
   }
 
-  const user = await verifyLogin(email, body.password);
-  if (!user) {
-    loginThrottle.fail(throttleKey);
+  if (!inst || !user) {
     throw badRequest(GENERIC);
   }
-  loginThrottle.reset(throttleKey);
 
   // Make sure a profile exists (older accounts), then link people records of THIS institute if needed.
   await sys.q(`insert into public.profiles (id, email, phone, status) values ($1, $2, $3, 'active') on conflict (id) do nothing`, [user.id, email, phone]);
