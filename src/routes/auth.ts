@@ -1,12 +1,12 @@
 import { Router, type Request } from "express";
 import { z } from "zod";
 import { asSystem, sys } from "../db/pool.js";
-import { badRequest, HttpError } from "../lib/errors.js";
+import { badRequest, forbidden, HttpError } from "../lib/errors.js";
 import { normalizePhone, passwordSchema, phoneSchema, requiredText } from "../lib/validation.js";
-import { authenticate, ctxOf, SUSPENDED_MESSAGE } from "../middleware.js";
+import { authenticate, bearer, ctxOf, SUSPENDED_MESSAGE } from "../middleware.js";
 import { healUserRoles, membershipOf, ROLE_HOME, ROLE_PRIORITY, type AppRole } from "../auth/context.js";
 import { hashPassword, verifyPassword } from "../auth/crypto.js";
-import { createSession, forgetUser, revokeSession, setSessionInstitute } from "../auth/sessions.js";
+import { createSession, forgetUser, revokeSession, sessionTtl, setSessionInstitute } from "../auth/sessions.js";
 import { consumeEmailLink, createAuthUser, sendPasswordReset } from "../auth/provision.js";
 import { loginThrottle } from "../lib/throttle.js";
 
@@ -258,9 +258,34 @@ authRouter.post("/platform-login", async (req, res) => {
   res.json({ ...session, home: "/platform" });
 });
 
-// ---------- Session / logout ----------
+// ---------- Session / refresh / logout ----------
 authRouter.get("/session", authenticate, (req, res) => {
   res.json(req.ctx);
+});
+
+authRouter.post("/refresh", authenticate, async (req, res) => {
+  const token = bearer(req);
+  const c = req.ctx!;
+  const s = await sys.one<{ id: string; persistent: boolean }>(
+    `select id, persistent from auth.sessions where id = $1 and expires_at > now()`,
+    [req.sessionId!],
+  );
+  if (!s) throw forbidden("Session expired or invalid.");
+
+  const newExpiresAt = new Date(Date.now() + sessionTtl(true));
+  await sys.q(
+    `update auth.sessions set last_seen_at = now(), expires_at = $2, persistent = true where id = $1`,
+    [req.sessionId!, newExpiresAt],
+  );
+
+  res.json({
+    ok: true,
+    token,
+    expiresAt: newExpiresAt.toISOString(),
+    persistent: true,
+    roles: c.roles,
+    home: c.platform ? "/platform" : homeFor(c.roles),
+  });
 });
 
 authRouter.post("/logout", authenticate, async (req, res) => {

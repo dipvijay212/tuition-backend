@@ -3,7 +3,7 @@ import { z } from "zod";
 import { asSystem, asUser } from "../db/pool.js";
 import { ctxOf, requireRole } from "../middleware.js";
 import { h, like, paging, qs, withCount } from "../lib/route.js";
-import { badRequest, notFound } from "../lib/errors.js";
+import { badRequest, forbidden, notFound } from "../lib/errors.js";
 import { fileField, jsonField, upload } from "../lib/upload.js";
 import { putFile, safeFileName, signedUrl, validateUpload } from "../lib/storage.js";
 import { provisionAccount, sendInvitation } from "../auth/provision.js";
@@ -11,7 +11,313 @@ import { renderAdmissionWelcomeEmail, sendEmail } from "../email/index.js";
 
 export const studentsRouter = Router();
 const admin = requireRole("admin");
+const staffOrFamily = requireRole("admin", "teacher", "student", "parent");
 const optStr = z.string().trim().nullish().transform((v) => v || null);
+
+// ---------- Performance & Progress Reporting ----------
+studentsRouter.get(
+  "/:id/performance",
+  staffOrFamily,
+  h(async ({ req, db, inst }) => {
+    const id = z.uuid().parse(req.params.id);
+    const ok = await db.one<{ allowed: boolean }>(
+      `select public.can_view_student($1) as allowed`,
+      [id],
+    );
+    if (!ok?.allowed) throw forbidden("You are not authorized to view this student's performance.");
+
+    const s = await db.one<{
+      id: string;
+      full_name: string;
+      admission_no: string;
+      roll_no: string | null;
+      status: string;
+      class_id: string | null;
+      class_name: string | null;
+      photo_path: string | null;
+      batches: Array<{ id: string; name: string }>;
+    }>(
+      `select s.id, s.full_name, s.admission_no, s.roll_no, s.status, s.class_id, s.photo_path,
+              c.name as class_name,
+              coalesce((select json_agg(json_build_object('id', b.id, 'name', b.name))
+                          from public.student_batches sb join public.batches b on b.id = sb.batch_id
+                         where sb.student_id = s.id and sb.status = 'active'), '[]') as batches
+         from public.students s
+         left join public.classes c on c.id = s.class_id
+        where s.id = $1 and s.institute_id = $2`,
+      [id, inst],
+    );
+    if (!s) throw notFound("Student not found.");
+
+    // Published results chronologically
+    type ExamRow = {
+      id: string;
+      examination_id: string;
+      total_obtained: string | number;
+      total_max: string | number;
+      percentage: string | number;
+      grade: string | null;
+      is_pass: boolean;
+      rank: number | null;
+      subject_breakdown: Array<{
+        subject_id?: string;
+        subject?: string;
+        max?: number;
+        passing?: number;
+        obtained?: number | null;
+        pass?: boolean;
+        is_pass?: boolean;
+        absent?: boolean;
+        is_absent?: boolean;
+      }>;
+      published_at: string;
+      exam_name: string;
+      exam_type: string;
+      start_date: string;
+      end_date: string;
+      batch_id: string | null;
+      batch_average: string | number | null;
+      batch_highest: string | number | null;
+      total_students_in_exam: number;
+    };
+
+    const rawResults = await db.q<ExamRow>(
+      `select r.id, r.examination_id, r.total_obtained, r.total_max, r.percentage, r.grade, r.is_pass, r.rank,
+              r.subject_breakdown, r.published_at,
+              e.name as exam_name, e.exam_type, e.start_date, e.end_date, e.batch_id,
+              (select round(avg(pr.percentage)::numeric, 1) from public.published_results pr where pr.examination_id = r.examination_id) as batch_average,
+              (select max(pr.percentage) from public.published_results pr where pr.examination_id = r.examination_id) as batch_highest,
+              (select count(*) from public.published_results pr where pr.examination_id = r.examination_id) as total_students_in_exam
+         from public.published_results r
+         join public.examinations e on e.id = r.examination_id
+        where r.student_id = $1 and r.institute_id = $2
+        order by e.start_date asc, r.published_at asc`,
+      [id, inst],
+    );
+
+    // Attendance summary & monthly history
+    const attSummary = await db.one<{
+      total_sessions: number;
+      attended: number;
+      absent: number;
+      late: number;
+      excused: number;
+      percentage: number | null;
+    }>(
+      `with a as (
+         select status from public.attendance where student_id = $1
+       ), c as (
+         select count(*) filter (where status = 'present')::int as attended,
+                count(*) filter (where status = 'absent')::int as absent,
+                count(*) filter (where status = 'late')::int as late,
+                count(*) filter (where status = 'excused')::int as excused,
+                count(*)::int as total_sessions
+           from a
+       )
+       select total_sessions, attended, absent, late, excused,
+              round(100.0 * (attended + late) / nullif(total_sessions - excused, 0), 1) as percentage
+         from c`,
+      [id],
+    );
+
+    const monthlyAttendance = await db.q<{
+      month: string;
+      attended: number;
+      total: number;
+      pct: number | null;
+    }>(
+      `select to_char(session_date, 'YYYY-MM') as month,
+              count(*) filter (where status in ('present', 'late')) as attended,
+              count(*) filter (where status != 'excused') as total,
+              round(100.0 * count(*) filter (where status in ('present', 'late')) / nullif(count(*) filter (where status != 'excused'), 0), 1) as pct
+         from public.attendance
+        where student_id = $1
+        group by to_char(session_date, 'YYYY-MM')
+        order by month asc`,
+      [id],
+    );
+
+    // Compute progression & deltas
+    const timeline = rawResults.map((r, i) => {
+      const prev = i > 0 ? rawResults[i - 1] : null;
+      const currentPct = Number(r.percentage);
+      const prevPct = prev ? Number(prev.percentage) : null;
+      const currentObt = Number(r.total_obtained);
+      const prevObt = prev ? Number(prev.total_obtained) : null;
+      const pctDelta = prevPct !== null ? Math.round((currentPct - prevPct) * 100) / 100 : null;
+      const marksDelta = prevObt !== null ? Math.round((currentObt - prevObt) * 100) / 100 : null;
+      const rankDelta = (prev?.rank && r.rank) ? (Number(prev.rank) - Number(r.rank)) : null;
+      const batchAvg = r.batch_average !== null ? Number(r.batch_average) : null;
+      const batchDiff = batchAvg !== null ? Math.round((currentPct - batchAvg) * 100) / 100 : null;
+
+      const rawSubjects = Array.isArray(r.subject_breakdown) ? r.subject_breakdown : [];
+      const subjects = rawSubjects.map((sb) => {
+        const max = Number(sb.max ?? 100);
+        const obt = sb.obtained !== null && sb.obtained !== undefined ? Number(sb.obtained) : null;
+        const pass = Boolean(sb.pass ?? sb.is_pass ?? false);
+        const absent = Boolean(sb.absent ?? sb.is_absent ?? false);
+        const pct = (obt !== null && max > 0) ? Math.round((obt / max) * 1000) / 10 : 0;
+        return {
+          subject_id: sb.subject_id ?? "",
+          subject: sb.subject ?? "Subject",
+          max,
+          passing: Number(sb.passing ?? 0),
+          obtained: obt,
+          percentage: pct,
+          is_pass: pass,
+          is_absent: absent,
+        };
+      });
+
+      return {
+        id: r.id,
+        examination_id: r.examination_id,
+        exam_name: r.exam_name,
+        exam_type: r.exam_type,
+        start_date: r.start_date,
+        end_date: r.end_date,
+        total_obtained: currentObt,
+        total_max: Number(r.total_max),
+        percentage: currentPct,
+        grade: r.grade,
+        rank: r.rank ? Number(r.rank) : null,
+        is_pass: r.is_pass,
+        percentage_delta: pctDelta,
+        marks_delta: marksDelta,
+        rank_delta: rankDelta,
+        batch_average: batchAvg,
+        batch_highest: r.batch_highest !== null ? Number(r.batch_highest) : null,
+        batch_difference: batchDiff,
+        total_students_in_exam: Number(r.total_students_in_exam ?? 0),
+        subjects,
+      };
+    });
+
+    // Subject trends over time
+    const subjectMap = new Map<string, {
+      subject_id: string;
+      subject_name: string;
+      history: Array<{ exam_name: string; date: string; percentage: number; obtained: number | null; max: number; is_pass: boolean }>;
+    }>();
+
+    for (const t of timeline) {
+      for (const sub of t.subjects) {
+        if (!sub.is_absent && sub.obtained !== null) {
+          const key = sub.subject_id || sub.subject;
+          if (!subjectMap.has(key)) {
+            subjectMap.set(key, {
+              subject_id: sub.subject_id,
+              subject_name: sub.subject,
+              history: [],
+            });
+          }
+          subjectMap.get(key)!.history.push({
+            exam_name: t.exam_name,
+            date: t.start_date,
+            percentage: sub.percentage,
+            obtained: sub.obtained,
+            max: sub.max,
+            is_pass: sub.is_pass,
+          });
+        }
+      }
+    }
+
+    const subjectTrends = Array.from(subjectMap.values()).map((entry) => {
+      const h = entry.history;
+      const count = h.length;
+      const currentPct = count > 0 ? h[count - 1].percentage : 0;
+      const prevPct = count > 1 ? h[count - 2].percentage : null;
+      const delta = prevPct !== null ? Math.round((currentPct - prevPct) * 10) / 10 : null;
+      const avgPct = count > 0 ? Math.round((h.reduce((sum, item) => sum + item.percentage, 0) / count) * 10) / 10 : 0;
+      const hasFailed = h.some((item) => !item.is_pass);
+
+      let status: "strength" | "neutral" | "needs_attention" = "neutral";
+      if (currentPct >= 80 || (avgPct >= 75 && (delta ?? 0) >= 0)) {
+        status = "strength";
+      } else if (currentPct < 45 || hasFailed || (delta !== null && delta <= -8)) {
+        status = "needs_attention";
+      }
+
+      return {
+        subject_id: entry.subject_id,
+        subject_name: entry.subject_name,
+        history: h,
+        current_percentage: currentPct,
+        average_percentage: avgPct,
+        delta,
+        status,
+      };
+    });
+
+    // Sort subjects: needs_attention first, then strength, then neutral
+    subjectTrends.sort((a, b) => {
+      const order = { needs_attention: 0, strength: 1, neutral: 2 };
+      return order[a.status] - order[b.status];
+    });
+
+    // Summary calculation
+    const totalExams = timeline.length;
+    const latest = totalExams > 0 ? timeline[totalExams - 1] : null;
+    const first = totalExams > 0 ? timeline[0] : null;
+    const prev = totalExams > 1 ? timeline[totalExams - 2] : null;
+    const percentages = timeline.map((t) => t.percentage);
+    const avgPercentage = totalExams > 0
+      ? Math.round((percentages.reduce((a, b) => a + b, 0) / totalExams) * 10) / 10
+      : 0;
+    const highestPercentage = totalExams > 0 ? Math.max(...percentages) : 0;
+    const lowestPercentage = totalExams > 0 ? Math.min(...percentages) : 0;
+    const latestDelta = latest?.percentage_delta ?? null;
+    const netImprovement = (latest && first)
+      ? Math.round((latest.percentage - first.percentage) * 100) / 100
+      : 0;
+
+    let overallTrend: "improving" | "declining" | "steady" = "steady";
+    if (latestDelta !== null) {
+      if (latestDelta >= 1.0) overallTrend = "improving";
+      else if (latestDelta <= -1.0) overallTrend = "declining";
+    }
+
+    const passedExams = timeline.filter((t) => t.is_pass).length;
+    const passRate = totalExams > 0 ? Math.round((passedExams / totalExams) * 1000) / 10 : 0;
+
+    const summary = {
+      total_exams: totalExams,
+      passed_exams: passedExams,
+      pass_rate: passRate,
+      current_percentage: latest?.percentage ?? 0,
+      previous_percentage: prev?.percentage ?? null,
+      average_percentage: avgPercentage,
+      highest_percentage: highestPercentage,
+      lowest_percentage: lowestPercentage,
+      latest_delta: latestDelta,
+      net_improvement: netImprovement,
+      trend: overallTrend,
+      current_rank: latest?.rank ?? null,
+      rank_delta: latest?.rank_delta ?? null,
+      attendance_percentage: attSummary?.percentage ?? null,
+      attended_sessions: attSummary?.attended ?? 0,
+      total_sessions: attSummary?.total_sessions ?? 0,
+    };
+
+    return {
+      student: {
+        id: s.id,
+        full_name: s.full_name,
+        admission_no: s.admission_no,
+        roll_no: s.roll_no,
+        status: s.status,
+        class_name: s.class_name,
+        batches: s.batches,
+        photo_url: s.photo_path ? signedUrl(s.photo_path) : null,
+      },
+      summary,
+      timeline,
+      subject_trends: subjectTrends,
+      attendance_history: monthlyAttendance,
+    };
+  }),
+);
 
 // ---------- Lists & detail ----------
 studentsRouter.get(
@@ -99,7 +405,7 @@ studentsRouter.get(
         coalesce((select json_agg(x) from (select a.id, a.session_date, a.status, json_build_object('name', b.name) as batches
                    from public.attendance a left join public.batches b on b.id = a.batch_id where a.student_id = $1 order by a.session_date desc limit 15) x), '[]') as "recentAtt",
         coalesce((select json_agg(json_build_object('id', r.id, 'percentage', r.percentage, 'grade', r.grade, 'is_pass', r.is_pass, 'rank', r.rank, 'total_obtained', r.total_obtained,
-                   'total_max', r.total_max, 'examinations', json_build_object('name', e.name, 'start_date', e.start_date)) order by r.published_at desc)
+                   'total_max', r.total_max, 'subject_breakdown', r.subject_breakdown, 'examinations', json_build_object('name', e.name, 'start_date', e.start_date)) order by r.published_at desc)
                    from public.published_results r join public.examinations e on e.id = r.examination_id where r.student_id = $1), '[]') as results,
         coalesce((select json_agg(json_build_object('id', d.id, 'title', d.title, 'file_path', d.file_path, 'created_at', d.created_at, 'size_bytes', d.size_bytes) order by d.created_at desc)
                    from public.student_documents d where d.student_id = $1), '[]') as docs,
