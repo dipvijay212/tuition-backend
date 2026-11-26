@@ -30,14 +30,13 @@ studentsRouter.get(
       id: string;
       full_name: string;
       admission_no: string;
-      roll_no: string | null;
       status: string;
       class_id: string | null;
       class_name: string | null;
       photo_path: string | null;
       batches: Array<{ id: string; name: string }>;
     }>(
-      `select s.id, s.full_name, s.admission_no, s.roll_no, s.status, s.class_id, s.photo_path,
+      `select s.id, s.full_name, s.admission_no, s.status, s.class_id, s.photo_path,
               c.name as class_name,
               coalesce((select json_agg(json_build_object('id', b.id, 'name', b.name))
                           from public.student_batches sb join public.batches b on b.id = sb.batch_id
@@ -137,9 +136,28 @@ studentsRouter.get(
       [id],
     );
 
+    // Per-session attendance, to attribute attendance to the period leading up to each exam.
+    const sessions = await db.q<{ session_date: string; status: string }>(
+      `select session_date::text as session_date, status::text as status
+         from public.attendance where student_id = $1 order by session_date`,
+      [id],
+    );
+    const attendanceBetween = (after: string | null, upTo: string) => {
+      let attended = 0;
+      let counted = 0;
+      for (const a of sessions) {
+        if ((after !== null && a.session_date <= after) || a.session_date > upTo) continue;
+        if (a.status === "excused") continue;
+        counted++;
+        if (a.status === "present" || a.status === "late") attended++;
+      }
+      return counted > 0 ? { pct: Math.round((1000 * attended) / counted) / 10, sessions: counted } : null;
+    };
+
     // Compute progression & deltas
     const timeline = rawResults.map((r, i) => {
       const prev = i > 0 ? rawResults[i - 1] : null;
+      const att = attendanceBetween(prev ? String(prev.start_date).slice(0, 10) : null, String(r.start_date).slice(0, 10));
       const currentPct = Number(r.percentage);
       const prevPct = prev ? Number(prev.percentage) : null;
       const currentObt = Number(r.total_obtained);
@@ -189,6 +207,8 @@ studentsRouter.get(
         batch_highest: r.batch_highest !== null ? Number(r.batch_highest) : null,
         batch_difference: batchDiff,
         total_students_in_exam: Number(r.total_students_in_exam ?? 0),
+        attendance_pct: att?.pct ?? null,
+        attendance_sessions: att?.sessions ?? 0,
         subjects,
       };
     });
@@ -211,7 +231,9 @@ studentsRouter.get(
               history: [],
             });
           }
-          subjectMap.get(key)!.history.push({
+          const entry = subjectMap.get(key)!;
+          entry.subject_name = sub.subject; // timeline is chronological: keep the latest name
+          entry.history.push({
             exam_name: t.exam_name,
             date: t.start_date,
             percentage: sub.percentage,
@@ -247,6 +269,9 @@ studentsRouter.get(
         average_percentage: avgPct,
         delta,
         status,
+        first_percentage: count > 0 ? h[0].percentage : 0,
+        best_percentage: count > 0 ? Math.max(...h.map((x) => x.percentage)) : 0,
+        change_since_first: count > 1 ? Math.round((currentPct - h[0].percentage) * 10) / 10 : null,
       };
     });
 
@@ -272,11 +297,24 @@ studentsRouter.get(
       ? Math.round((latest.percentage - first.percentage) * 100) / 100
       : 0;
 
+    // Trend over a rolling window, so one off-day doesn't flip the verdict:
+    // average of the last k exams vs the k before (k = up to 3).
+    const round1 = (n: number) => Math.round(n * 10) / 10;
+    const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
+    const trendWindow = Math.min(3, Math.floor(totalExams / 2));
+    const recentAverage = trendWindow > 0 ? round1(mean(percentages.slice(-trendWindow))) : null;
+    const priorAverage = trendWindow > 0 ? round1(mean(percentages.slice(-2 * trendWindow, -trendWindow))) : null;
+    const trendDelta = recentAverage !== null && priorAverage !== null ? round1(recentAverage - priorAverage) : null;
+
     let overallTrend: "improving" | "declining" | "steady" = "steady";
-    if (latestDelta !== null) {
-      if (latestDelta >= 1.0) overallTrend = "improving";
-      else if (latestDelta <= -1.0) overallTrend = "declining";
+    if (trendDelta !== null) {
+      if (trendDelta >= 2) overallTrend = "improving";
+      else if (trendDelta <= -2) overallTrend = "declining";
     }
+    // A notable drop in the latest exam that the longer trend doesn't (yet) confirm.
+    const latestDip = latestDelta !== null && latestDelta <= -3 && overallTrend !== "declining";
+
+    const bestIdx = totalExams > 0 ? percentages.indexOf(highestPercentage) : -1;
 
     const passedExams = timeline.filter((t) => t.is_pass).length;
     const passRate = totalExams > 0 ? Math.round((passedExams / totalExams) * 1000) / 10 : 0;
@@ -293,6 +331,16 @@ studentsRouter.get(
       latest_delta: latestDelta,
       net_improvement: netImprovement,
       trend: overallTrend,
+      trend_delta: trendDelta,
+      trend_window: trendWindow,
+      recent_average: recentAverage,
+      prior_average: priorAverage,
+      latest_dip: latestDip,
+      first_percentage: first?.percentage ?? null,
+      first_exam_name: first?.exam_name ?? null,
+      best_exam_name: bestIdx >= 0 ? timeline[bestIdx].exam_name : null,
+      latest_exam_name: latest?.exam_name ?? null,
+      current_rank_out_of: latest?.total_students_in_exam ?? null,
       current_rank: latest?.rank ?? null,
       rank_delta: latest?.rank_delta ?? null,
       attendance_percentage: attSummary?.percentage ?? null,
@@ -305,7 +353,6 @@ studentsRouter.get(
         id: s.id,
         full_name: s.full_name,
         admission_no: s.admission_no,
-        roll_no: s.roll_no,
         status: s.status,
         class_name: s.class_name,
         batches: s.batches,
