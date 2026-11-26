@@ -34,10 +34,12 @@ studentsRouter.get(
       class_id: string | null;
       class_name: string | null;
       photo_path: string | null;
+      institute_name: string;
       batches: Array<{ id: string; name: string }>;
     }>(
       `select s.id, s.full_name, s.admission_no, s.status, s.class_id, s.photo_path,
               c.name as class_name,
+              (select i.name from public.institutes i where i.id = s.institute_id) as institute_name,
               coalesce((select json_agg(json_build_object('id', b.id, 'name', b.name))
                           from public.student_batches sb join public.batches b on b.id = sb.batch_id
                          where sb.student_id = s.id and sb.status = 'active'), '[]') as batches
@@ -355,6 +357,7 @@ studentsRouter.get(
         admission_no: s.admission_no,
         status: s.status,
         class_name: s.class_name,
+        institute_name: s.institute_name,
         batches: s.batches,
         photo_url: s.photo_path ? signedUrl(s.photo_path) : null,
       },
