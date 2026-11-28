@@ -6,3 +6,4 @@ export * from "./homework-alert.js";
 export * from "./test-email.js";
 export * from "./invitation.js";
 export * from "./password-reset.js";
+export * from "./fee-reminder.js";

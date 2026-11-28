@@ -1,6 +1,8 @@
 import express from "express";
 import { errorHandler, notFound } from "./lib/errors.js";
-import { authenticate, requireInternalKey } from "./middleware.js";
+import { authenticate, requireInternalKey, requireTenant } from "./middleware.js";
+import { platformRouter } from "./routes/platform.js";
+import { subscriptionRouter } from "./routes/subscription.js";
 import { authRouter } from "./routes/auth.js";
 import { filesRouter } from "./routes/files.js";
 import { notificationsRouter } from "./routes/notifications.js";
@@ -17,6 +19,7 @@ import { settingsRouter } from "./routes/settings.js";
 import { feesRouter } from "./routes/fees.js";
 import { examsRouter } from "./routes/exams.js";
 import { learningRouter } from "./routes/learning.js";
+import { cronRouter } from "./routes/cron.js";
 
 export function createApp() {
   const app = express();
@@ -28,12 +31,21 @@ export function createApp() {
     res.json({ ok: true });
   });
 
+  // Scheduled jobs (external cron); protected by CRON_SECRET, not the internal key.
+  app.use("/cron", cronRouter);
+
   app.use(requireInternalKey);
   app.use("/auth", authRouter);
   app.use("/files", filesRouter); // signed URLs; no session needed
 
   // Everything below requires a signed-in user.
   app.use(authenticate);
+  app.use("/platform", platformRouter); // platform staff only
+
+  // Institute (tenant) API: suspended institutes are blocked, expired subscriptions are read-only,
+  // and plan features gate their route groups. Data isolation is also enforced by Postgres RLS.
+  app.use(requireTenant);
+  app.use("/subscription", subscriptionRouter);
   app.use("/notifications", notificationsRouter);
   app.use("/academics", academicsRouter);
   app.use("/batches", batchesRouter);

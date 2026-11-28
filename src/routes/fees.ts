@@ -123,7 +123,7 @@ feesRouter.post("/payments", async (req, res) => {
   if (["upi", "bank_transfer", "cheque", "online"].includes(v.method) && !v.reference) throw badRequest("Transaction reference is required for electronic payments");
 
   // record_payment checks admin rights, allocates oldest-first and issues the receipt.
-  const result = await asUser(ctx.userId, async (db) => {
+  const result = await asUser(ctx, async (db) => {
     const r = await db.one<{ r: { payment_id: string; receipt_no: string; duplicate?: boolean } }>(
       `select public.record_payment($1, $2, $3, $4, $5, $6, $7, $8) as r`,
       [v.student_id, v.amount, v.payment_date, v.method, v.reference ?? "", v.remarks ?? "", v.obligation_ids.length ? v.obligation_ids : null, v.idempotency_key ?? randomUUID()],

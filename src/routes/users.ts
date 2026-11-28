@@ -4,7 +4,7 @@ import { asSystem } from "../db/pool.js";
 import { ctxOf, requireRole } from "../middleware.js";
 import { h, like, paging, qs, withCount } from "../lib/route.js";
 import { badRequest, notFound } from "../lib/errors.js";
-import { revokeAllSessions } from "../auth/sessions.js";
+import { forgetUser, revokeInstituteSessions } from "../auth/sessions.js";
 import { provisionAccount, sendPasswordReset } from "../auth/provision.js";
 import { passwordSchema, phoneSchema } from "../lib/validation.js";
 
@@ -19,14 +19,14 @@ usersRouter.get(
     const q = qs(req, "q");
     const role = qs(req, "role") ?? null;
     const rows = await db.q<{ total_count: number }>(
-      `select p.id, p.full_name, p.email, p.phone, p.status, p.last_login_at,
+      `select p.id, p.full_name, p.email, p.phone, m.status, m.last_login_at,
               coalesce((select json_agg(json_build_object('role', r.role)) from public.user_roles r
                          where r.user_id = p.id and r.institute_id = $1 and ($4::text is null or r.role::text = $4)), '[]') as user_roles,
               count(*) over() as total_count
-         from public.profiles p
-        where p.institute_id = $1
+         from public.memberships m join public.profiles p on p.id = m.user_id
+        where m.institute_id = $1
           and ($2::text is null or p.full_name ilike $2 or p.email ilike $2 or p.phone ilike $2)
-          and ($3::text is null or p.status::text = $3)
+          and ($3::text is null or m.status::text = $3)
           and ($4::text is null or exists (select 1 from public.user_roles r where r.user_id = p.id and r.institute_id = $1 and r.role::text = $4))
         order by p.full_name limit $5 offset $6`,
       [inst, q ? like(q) : null, qs(req, "status") ?? null, role, limit, offset],
@@ -65,7 +65,14 @@ async function audit(inst: string, userId: string, action: string, entityId: str
 }
 
 const memberOf = (inst: string, userId: string) =>
-  asSystem((db) => db.one<{ status: string; full_name: string; email: string | null }>(`select status, full_name, email from public.profiles where id = $1 and institute_id = $2`, [userId, inst]));
+  asSystem((db) =>
+    db.one<{ status: string; full_name: string; email: string | null }>(
+      `select m.status, p.full_name, coalesce(u.email, p.email) as email
+         from public.memberships m join public.profiles p on p.id = m.user_id left join auth.users u on u.id = m.user_id
+        where m.user_id = $1 and m.institute_id = $2`,
+      [userId, inst],
+    ),
+  );
 
 usersRouter.post("/:id/status", async (req, res) => {
   const ctx = ctxOf(req);
@@ -75,8 +82,10 @@ usersRouter.post("/:id/status", async (req, res) => {
   if (v.reason.length < 5) throw badRequest("Please give a reason.");
   const p = await memberOf(ctx.institute.id, id);
   if (!p) throw notFound("User not found.");
-  await asSystem((db) => db.q(`update public.profiles set status = $2 where id = $1`, [id, v.status]), ctx.userId);
-  if (v.status !== "active") await revokeAllSessions(id); // sign out blocked users everywhere
+  // Status is per institute: blocking someone here never affects their access to other institutes.
+  await asSystem((db) => db.q(`update public.memberships set status = $3 where user_id = $1 and institute_id = $2`, [id, ctx.institute.id, v.status]), ctx);
+  if (v.status !== "active") await revokeInstituteSessions(id, ctx.institute.id);
+  else forgetUser(id);
   await audit(ctx.institute.id, ctx.userId, "account_status_changed", id, { status: p.status }, { status: v.status }, v.reason);
   res.json({ message: `Account ${v.status}` });
 });
@@ -97,7 +106,8 @@ usersRouter.post("/:id/roles", async (req, res) => {
       }
       await db.q(`delete from public.user_roles where user_id = $1 and institute_id = $2 and role = $3`, [id, ctx.institute.id, v.role]);
     }
-  }, ctx.userId);
+  }, ctx);
+  forgetUser(id);
   await audit(ctx.institute.id, ctx.userId, v.grant ? "role_granted" : "role_revoked", id, null, { role: v.role });
   res.json({ message: v.grant ? `${v.role} access granted` : `${v.role} access removed` });
 });
@@ -105,11 +115,10 @@ usersRouter.post("/:id/roles", async (req, res) => {
 usersRouter.post("/:id/password-reset", async (req, res) => {
   const ctx = ctxOf(req);
   const id = z.uuid().parse(req.params.id);
-  const u = await asSystem((db) =>
-    db.one<{ email: string | null }>(`select coalesce(u.email, p.email) as email from public.profiles p join auth.users u on u.id = p.id where p.id = $1 and p.institute_id = $2`, [id, ctx.institute.id]),
-  );
-  if (!u?.email) throw badRequest("This user has no email address.");
-  await sendPasswordReset(id, u.email);
+  const u = await memberOf(ctx.institute.id, id);
+  if (!u) throw notFound("User not found.");
+  if (!u.email) throw badRequest("This user has no email address.");
+  await sendPasswordReset(id, u.email, ctx.institute.id);
   await audit(ctx.institute.id, ctx.userId, "password_reset_sent", id, null, null);
   res.json({ message: `Reset link sent to ${u.email}` });
 });

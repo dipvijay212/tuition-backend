@@ -10,7 +10,7 @@ export type Handler<T> = (x: { req: Request; ctx: Ctx; db: Db; inst: string }) =
 export function h<T>(fn: Handler<T>): RequestHandler {
   return async (req, res) => {
     const ctx = ctxOf(req);
-    const out = await asUser(ctx.userId, (db) => fn({ req, ctx, db, inst: ctx.institute.id }));
+    const out = await asUser(ctx, (db) => fn({ req, ctx, db, inst: ctx.institute.id }));
     res.json(out === undefined ? { ok: true } : out);
   };
 }
